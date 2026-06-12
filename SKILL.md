@@ -2,7 +2,7 @@
 name: personal-rag
 title: Albert's Personal RAG (Vault Knowledge Retrieval)
 description: "Retrieve grounded, cited answers from Albert's OWN AUA coursework, lecture notes, textbooks, and notebooks. Use when he asks what he knows about a topic, how he did something in his own homework/capstone/coursework, or wants to drill his own materials for interview/exam prep. NOT for general-knowledge questions unrelated to his vault."
-version: 0.2.0
+version: 0.3.0
 author: Albert Hakobyan
 license: MIT
 dependencies: [chromadb, sentence-transformers, bm25s, openai, pyyaml, python-dotenv, fastapi, uvicorn, streamlit, pymupdf, pymupdf4llm]
@@ -133,6 +133,39 @@ curl.exe -X POST http://127.0.0.1:8051/query -H "Content-Type: application/json"
 > Invoke-RestMethod -Uri http://127.0.0.1:8051/query -Method Post -ContentType "application/json" -Body '{"q":"How did I use knowledge distillation in my capstone?"}'
 > ```
 
+### Per-query knobs (all optional, session 6+)
+
+```cmd
+curl.exe -X POST http://127.0.0.1:8051/query -H "Content-Type: application/json" -d "{\"q\":\"...\", \"top_k\": 10, \"preset\": \"code\"}"
+```
+
+- `top_k` (1–50) — overrides `rerank_top_k` for this call only (how many
+  reranked chunks reach the LLM). Wins over the preset's value.
+- `preset` — `code` | `concept` | `synthesis` (bundles from config.yaml
+  `retrieval.presets`). Omit for **auto**: queries that look like code requests
+  ("show me my ggplot code", mentions of scripts/notebooks/libraries) auto-apply
+  the `code` preset — HyDE off, candidate pool 40/40 plus a code lane filtered
+  to `.ipynb/.py/.R/.Rmd`, k=10. Use `preset: "code"` explicitly when asking
+  for Albert's own code and the auto-detection didn't fire.
+- `max_sources` — caps the JSON `sources` list. Omit to get every chunk the
+  LLM saw (follows the effective top_k).
+
+Scope routing is automatic — no field needed. If the query NAMES a domain
+("statistics", "BI", "NLP", "DataViz", a library like pytorch/ggplot) or a
+content type ("my homework", "lecture files", "the tech books", "cheat
+sheet"), retrieval adds filtered lanes for that scope, so phrase queries
+naturally: "bayes theorem in my statistics lectures" beats "bayes theorem".
+The dictionaries live in config.yaml (`retrieval.domain_signals` /
+`content_signals`) — extend them there, no code changes.
+
+Defaults can be changed live, no restart (`persist: true` also rewrites
+config.yaml so the value survives restarts):
+
+```cmd
+curl.exe -X POST http://127.0.0.1:8051/config -H "Content-Type: application/json" -d "{\"rerank_top_k\": 10, \"persist\": false}"
+curl.exe http://127.0.0.1:8051/config
+```
+
 ### Response shape
 
 ```json
@@ -153,9 +186,13 @@ curl.exe -X POST http://127.0.0.1:8051/query -H "Content-Type: application/json"
 
 - `citations` = the sources the answer actually referenced (`[n]` markers), each
   with its label.
-- `sources` = all retrieved sources (up to `max_sources`, default 7), each with a
-  `cited` flag showing whether it made it into the answer. Surface the `cited`
-  ones first; the rest are "also retrieved but not used."
+- `sources` = the chunks the LLM saw (capped by `max_sources` if you set it),
+  each with a `cited` flag showing whether it made it into the answer. Surface
+  the `cited` ones first; the rest are "also retrieved but not used."
+- `retrieval` = echo of what actually ran, e.g.
+  `{"preset": "code (auto)", "rerank_top_k": 10, "hyde_used": false,
+  "scope": ["domain:stats(statistics)", "content:lectures(lecture)"], ...}` —
+  check this when debugging why an answer pulled the wrong sources.
 
 If generation fails (proxy down), `/query` returns a payload with
 `confidence: "ERROR"` and an `answer` explaining the backend is unreachable (the
