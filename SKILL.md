@@ -56,6 +56,19 @@ curl.exe http://127.0.0.1:8051/stats
 Read `/stats` for live corpus totals. Never quote a count copied into this
 playbook.
 
+Read `state` on `/health`, not just `ready`. It separates the two not-ready
+cases that are otherwise indistinguishable from outside:
+
+| `state` | Meaning | Do |
+|---|---|---|
+| `ready` | Pipeline warm. | Proceed. |
+| `loading` | Still building indexes and models. | Wait and poll. Report progress, do not diagnose. |
+| `failed` | The build raised; the process stays up to say so. | Stop. Read `error` and `hint`, and hand to `rag-ops`. |
+
+A `failed` service answers `/health` and returns 503 with the same text from
+every retrieval endpoint. Treat that 503 as a diagnosis, not a transport
+failure, and never retry it as if it were one.
+
 ## Send JSON safely
 
 Use escaped JSON with `curl.exe` in `cmd.exe`:
@@ -90,6 +103,7 @@ core control surface:
 | `parent_context` | Replace a matched note chunk with its full section. |
 | `neighbor_context` | Add adjacent PDF pages as supplementary context. |
 | `rerank` | Override the method with a mode reported by `/schema`. |
+| `rerank_instruction` | State the ranking criterion in plain language. Reorders the candidate pool; never filters it. |
 | `include_text` | Request an evidence text excerpt. |
 | `max_sources` | Cap returned sources without changing retrieval itself. |
 | `retrieve_only` | Skip generation on `/query` and return evidence. |
@@ -115,6 +129,38 @@ Discover common preset behavior live. Typically:
 
 Name the domain, course, content type, library, or user tag in the query when it
 matters. Let scope routing and tag boosts act on explicit wording.
+
+### State the ranking criterion with `rerank_instruction`
+
+Send `rerank_instruction` when the question alone does not say what makes one
+chunk *better* than another — "prefer worked procedures over definitions",
+"prefer primary sources over summaries". It joins the text the reranker scores
+against, so it changes the order of an already-built candidate pool. It can
+never add or remove a candidate. Use it instead of narrowing `q` when the topic
+is right but the *kind* of material coming back is wrong.
+
+It is honoured only by the modes that score semantically:
+
+| `rerank` mode | Behaviour |
+|---|---|
+| `cross_encoder` | Applied. The model reads criterion and question together. |
+| `http` | Applied. Sent as one query to the external service. |
+| `lexical` | **Ignored by design.** Lexical scoring is query-term coverage; a sentence of instruction would dilute every real query term. |
+| `none` | Nothing is scored at all. |
+
+Never infer from the request alone that it took effect. Read the retrieval echo,
+which reports both the criterion and whether it was actually applied:
+
+```cmd
+curl.exe -X POST http://127.0.0.1:8051/search -H "Content-Type: application/json" -d "{\"q\":\"confidence interval for a regression coefficient\",\"rerank_instruction\":\"prefer worked step-by-step procedures over definitions\"}"
+```
+
+- `retrieval.rerank_instruction` — the criterion that was applied, or `null`.
+- `retrieval.rerank_instruction_applied` — `false` means it changed nothing.
+
+A `false` echo under `lexical` or `none` is correct behaviour, not a fault.
+Send `""` to switch a configured criterion off for one call; omit the field
+entirely to inherit the configured one.
 
 ## Inspect evidence before generation
 
@@ -170,8 +216,28 @@ provider-aware or retrieval-aware error text.
 
 ## Compare a tree of query branches
 
-Use `/compare` to run one question under bounded branch overrides. Read branch
-limits and allowed fields from `/schema`.
+Use `/compare` to run one question under bounded branch overrides.
+
+Call `GET /compare/options` first. It returns ready-to-post branch objects, so
+stop hand-assembling them from `/schema` presets, `/schema` rerank modes and
+`/providers`, and stop re-deriving the branch caps from prose:
+
+```cmd
+curl.exe http://127.0.0.1:8051/compare/options
+```
+
+- `branch_limits` — the real `min`, `search` and `query` caps, as enforced.
+- `dimensions` — one comparable axis each (`preset`, `reranker`, `provider`),
+  carrying the `mode` that axis requires and its list of branch objects.
+- Post 2 or more branches from **one** dimension, with that dimension's `mode`.
+
+Unavailable backends are **listed and marked**, not hidden. A provider branch
+carries `available` and, when false, `unavailable_reason` naming the missing
+credential. Never post an unavailable branch and report its failure as a
+finding about the model; drop it, or say the comparison could not include it.
+
+Read branch limits and allowed fields from `/schema` only when you need a field
+`/compare/options` does not cover.
 
 Compare retrieval without spending generation tokens:
 
@@ -244,10 +310,13 @@ Climb this ladder only while each step adds value:
 7. Try `hype:true` when user wording differs from document wording.
 8. Add `parent_context` or `neighbor_context` when evidence is relevant but
    fragmentary.
-9. Try query variants and merge distinct evidence for synonym-heavy topics.
-10. Decompose into the iterative self-RAG loop when one retrieval cannot cover
+9. Send `rerank_instruction` when the topic is right but the kind of material is
+   wrong — definitions where procedures were wanted, summaries where primary
+   sources were. Confirm `rerank_instruction_applied` before judging the result.
+10. Try query variants and merge distinct evidence for synonym-heavy topics.
+11. Decompose into the iterative self-RAG loop when one retrieval cannot cover
     the question.
-11. Stop honestly when the corpus does not contain the needed material.
+12. Stop honestly when the corpus does not contain the needed material.
 
 Do not persistently disable tuned defaults to rescue one weak query. Use
 per-call overrides, evaluate the result, and leave configuration changes to
@@ -316,7 +385,10 @@ provider-key workflow.
 |---|---|
 | Connection refused on `:8051` | Start the warm API and poll `/health`. |
 | `/health` is ready but generation fails | Inspect `/providers`; retry retrieval through `/search`. |
+| `/health` reports `state:"failed"` | Read `error` and `hint`; hand to `rag-ops` with `GET /api/service/log`. Do not retry the 503. |
 | `Reranking failed:` | Inspect `/config`; fix the reranker model, limit, device, or HTTP service through `rag-ops`. |
+| Right topic, wrong kind of material | Send `rerank_instruction`; verify `rerank_instruction_applied:true`. |
+| `rerank_instruction_applied:false` | The mode is `lexical` or `none`, which ignore it. Switch to `cross_encoder` or `http`. |
 | Expected source absent from `/search` | Widen candidate pools, name scope/tags, try HyPE, and rephrase. |
 | Relevant source appears below cutoff | Raise `top_k`. |
 | Relevant evidence is fragmentary | Enable parent/neighbor context or use a synthesis preset. |

@@ -144,6 +144,29 @@ Confirm the mutation, then send only intended dotted keys to
 `POST /api/settings`. Do not copy a stale whole-settings payload over concurrent
 changes. Respect each field's reported restart policy.
 
+Preflight a cross-encoder before writing `retrieval.cross_encoder_model`.
+Switching reranker is a config write plus a `:8051` restart, and every way it
+can go wrong used to look identical from the console — the restart simply never
+reported ready:
+
+```cmd
+curl.exe -X POST http://127.0.0.1:8052/api/rerank/check -H "Content-Type: application/json" -d "{\"model\":\"BAAI/bge-reranker-v2-m3\"}"
+```
+
+It downloads nothing. Read:
+
+- `usable` — the verdict. Do not persist a model that reports `false`.
+- `reachable` / `cached` — whether the hub answers, and whether the weights are
+  already local. An uncached model means the next restart pays a download.
+- `context_length` vs `max_length` — a configured maximum above the model's own
+  limit is a guaranteed failure at query time, not a slow path.
+- `warnings` — act on these before persisting.
+
+A model reported unreachable is not automatically missing. A stale or revoked
+Hugging Face token makes the hub answer **401**, which surfaces as
+"repository not found" for *every* public model; this endpoint distinguishes
+that case, so read its explanation instead of concluding the model was renamed.
+
 Validate reranker combinations before persisting:
 
 - Keep `BAAI/bge-reranker-base` at or below its 512-token context limit.
@@ -151,6 +174,11 @@ Validate reranker combinations before persisting:
   model.
 - Configure an HTTP URL/model before choosing `http` reranking.
 - Treat invalid model/limit/device combinations as explicit failures.
+
+Set `retrieval.rerank_instruction` only as a durable, corpus-wide ranking
+criterion. A criterion for one question belongs in the per-call field that
+`personal-rag` owns, not in persisted configuration. It is ignored by
+`rerank_mode: lexical` and `none`.
 
 Use `lexical` for a model-free low-power profile and `none` only for deliberate
 fused-order diagnostics. Do not silently downgrade a failed configured
@@ -282,9 +310,30 @@ reported by `/api/schema`, typically:
 curl.exe -X POST http://127.0.0.1:8052/api/service/restart
 ```
 
-Poll `GET :8051/health`, then verify with `GET :8051/config`, `/providers`,
-`/stats`, and a targeted `/search`. Never claim that a restart or change worked
-until those checks pass.
+Poll `GET :8051/health` and read its `state`, not only `ready`:
+
+| `state` | Meaning | Action |
+|---|---|---|
+| `loading` | Indexes and models still building. | Keep polling. Report progress. |
+| `ready` | Warm. | Verify, then report success. |
+| `failed` | The build raised. The process deliberately stays up to say why. | Read `error` and `hint`, then the startup log. Do not restart again blindly. |
+
+A build failure is reported, never fatal: the service keeps answering `/health`
+and returns 503 with the same reason from every retrieval endpoint, instead of
+crash-looping under the supervisor while `/health` answers nothing at all.
+
+When a restart comes back but never reports ready, tail the startup log rather
+than guessing:
+
+```cmd
+curl.exe "http://127.0.0.1:8052/api/service/log?lines=120"
+```
+
+This is the other half of the restart lane. Quote the first causal error from
+it; a restart that "did nothing" is almost always a build error recorded there.
+
+Then verify with `GET :8051/config`, `/providers`, `/stats`, and a targeted
+`/search`. Never claim that a restart or change worked until those checks pass.
 
 ## Triage failures explicitly
 
@@ -301,6 +350,9 @@ until those checks pass.
 | OCR readiness fails | Inspect `/api/ocr/status`, configured preset, and external OCR service before ingesting. |
 | Dense/sparse/JSONL counts diverge unexpectedly | Run read-side integrity checks before proposing a rebuild. |
 | Query API shows stale state after a successful job | Restart `:8051`, poll health, and verify a targeted search. |
+| Restart returns but `/health` never leaves `loading` | Tail `GET /api/service/log`; report the first causal error instead of restarting again. |
+| `/health` reports `state:"failed"` | Read `error` and `hint`, then the startup log. The 503 from retrieval endpoints is the diagnosis, not a transport fault. |
+| Every public reranker reports "repository not found" | Suspect a stale or revoked Hugging Face token, not a missing model. `POST /api/rerank/check` distinguishes 401 from genuinely absent. |
 
 Raise errors explicitly. Never turn an unavailable dependency, partial write,
 or failed restart into a success message.
