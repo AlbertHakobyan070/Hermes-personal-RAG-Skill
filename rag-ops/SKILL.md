@@ -247,14 +247,36 @@ Inspect OCR readiness:
 curl.exe http://127.0.0.1:8052/api/ocr/status
 ```
 
+The PaddleOCR lane has **three** states, not two, and collapsing them produces
+the wrong advice every time:
+
+| Reported | Meaning | Say |
+|---|---|---|
+| `configured: false` | No sidecar in the config at all. | It is not set up; offer to configure it. |
+| `configured, reachable: false` | Nothing answers. | Almost always the container is deliberately stopped to reclaim memory between ingests. **Not a fault.** Offer to start it. |
+| `reachable: true, engine_importable: false` | It answers HTTP and cannot OCR. | A real defect in the image. Quote `engine_error`; restarting will not help. |
+
+`engine_importable: null` means unknown — an older sidecar image that predates
+the field. Report it as unknown, never as broken: calling a working container
+red is its own failure.
+
+The sidecar returns **503** when its engine cannot import, so a bare
+reachability test that treats any answer as "up" will file the third state
+under the second.
+
+The sidecar runs CPU or GPU on the same port and the same contract, so nothing
+in the config distinguishes them. `device` on its `/health` is what tells you
+which is running — and a GPU build that quietly fell back to CPU shows up only
+as unexplained slowness, so read it before investigating page rates.
+
 Treat `POST /api/ocr/warm` as a mutating external action: confirm before sending
 the tiny real model request because it may allocate or bill the configured
 service. A successful warm-up proves that the OCR request path worked, not that
 a later full ingest will succeed.
 
-Choose `auto`, `tesseract`, `vlm`, or `none` only when currently reported as
-valid. Start external OCR infrastructure through the project's documented
-launcher when required; do not invent a model path or endpoint.
+Choose `auto`, `tesseract`, `paddle`, `vlm`, or `none` only when currently
+reported as valid. Start external OCR infrastructure through the project's
+documented launcher when required; do not invent a model path or endpoint.
 
 Avoid running memory-heavy OCR, evaluation, and query services together when
 the host cannot support them.
@@ -348,6 +370,8 @@ Then verify with `GET :8051/config`, `/providers`, `/stats`, and a targeted
 | Provider key is present but incompatible | Replace it with the declared credential type; never bypass prefix checks. |
 | MiniMax returns billing/auth failure | Confirm that the configured M3 Token Plan entry has a compatible `sk-cp-` subscription key and test reachability separately. |
 | OCR readiness fails | Inspect `/api/ocr/status`, configured preset, and external OCR service before ingesting. |
+| PaddleOCR sidecar reachable but every page fails | Read `engine_importable`/`engine_error`: the engine cannot import. A rebuild fixes it; a restart does not. |
+| PaddleOCR sidecar unreachable | Usually stopped on purpose to reclaim memory. Offer to start it; do not report it as a fault. |
 | Dense/sparse/JSONL counts diverge unexpectedly | Run read-side integrity checks before proposing a rebuild. |
 | Query API shows stale state after a successful job | Restart `:8051`, poll health, and verify a targeted search. |
 | Restart returns but `/health` never leaves `loading` | Tail `GET /api/service/log`; report the first causal error instead of restarting again. |
