@@ -269,6 +269,34 @@ in the config distinguishes them. `device` on its `/health` is what tells you
 which is running — and a GPU build that quietly fell back to CPU shows up only
 as unexplained slowness, so read it before investigating page rates.
 
+### Which ENGINE, which is a separate question from which device
+
+The sidecar serves two, reported as `pipeline` (the default) and `pipelines`
+(what this image can actually do):
+
+| | `ocr` | `vl` |
+|---|---|---|
+| models | PP-OCRv6 detect + recognise | PP-DocLayoutV3 + PaddleOCR-VL-1.6-0.9B |
+| output | plain text lines | markdown: headings, `$…$` LaTeX, HTML tables |
+| cost | ~3 s/page, ~1.1 GB VRAM | ~30x that, ~7.9 GB VRAM |
+
+Measured on a Pascal 8GB card over dense textbook pages: **`vl` is no better at
+prose and roughly 30x slower**, so do not recommend switching a whole ingest to
+it for a scanned novel. It wins where the STRUCTURE is the content — it
+reconstructs a dynamic-programming table as real HTML with its headers, where
+`ocr` returns the same digits with every relationship gone. That is a per-book
+judgement (`pdf.paddle_ocr.pipeline`), not a global setting; on a 400-page book
+the choice is roughly 20 minutes against 10 hours.
+
+`pipelines.vl.available: false` always carries a `reason`. A CPU image has no
+`PaddleOCRVL` at all and needs the GPU image; a GPU image built without the
+`paddlex[ocr]` extras needs a rebuild. Quote the reason rather than guessing
+which.
+
+A request for an unavailable engine answers **501**. The sidecar never
+substitutes the other one, so a page that came back is the engine that was
+asked for.
+
 Treat `POST /api/ocr/warm` as a mutating external action: confirm before sending
 the tiny real model request because it may allocate or bill the configured
 service. A successful warm-up proves that the OCR request path worked, not that
