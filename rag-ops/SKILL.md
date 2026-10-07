@@ -1,6 +1,6 @@
 ---
 name: rag-ops
-description: "Operate and diagnose a configured personal-RAG corpus through its management API: inspect documents and settings, ingest files, run OCR and indexing jobs, manage tags, remove indexed documents, switch vaults, store declared provider credentials, restart the warm query service, and monitor failures. Use for corpus or runtime operations, not for answering a question from the vault; use personal-rag for retrieval, cited answers, and query comparisons."
+description: "Operate and diagnose a configured personal-RAG corpus through its management API: inspect documents and settings, ingest files, run OCR and indexing jobs, manage tags, remove indexed documents, switch vaults, store declared provider credentials, restart the warm query service, run the retrieval eval bench and review its questions, and monitor failures. Use for corpus or runtime operations, not for answering a question from the vault; use personal-rag for retrieval, cited answers, and query comparisons."
 ---
 
 # RAG Operations
@@ -87,6 +87,9 @@ Read:
   request fields.
 - `GET :8051/chunks/{id}` for a stable evidence record when
   `lookup_available:true`.
+- The `retrieval` echo of a targeted `/search` for what actually ran: `timings`
+  and `cold` (a cold call's timings are a one-off load, not steady state),
+  `lanes_run`, `hyde_cache`, and `gate` (what the relevance gate dropped).
 - `POST :8051/compare` through `personal-rag` for evidence membership/rank and
   provider comparisons.
 
@@ -178,11 +181,40 @@ Validate reranker combinations before persisting:
 Set `retrieval.rerank_instruction` only as a durable, corpus-wide ranking
 criterion. A criterion for one question belongs in the per-call field that
 `personal-rag` owns, not in persisted configuration. It is ignored by
-`rerank_mode: lexical` and `none`.
+`rerank_mode: lexical`, `none` and `laya`.
 
 Use `lexical` for a model-free low-power profile and `none` only for deliberate
 fused-order diagnostics. Do not silently downgrade a failed configured
 reranker.
+
+## Switch experimental features on deliberately
+
+Some features are built and tested but unmeasured, so they ship **off**.
+`GET /api/settings` lists them under `experimental`: each row carries an `id`, the
+config `key` that switches it, a `label`, `what` it does, `why_off`, what stays
+`unaffected`, its `surfaces`, and whether it is `on` in the config on disk. Read
+`what` and `why_off` to the operator before proposing a switch.
+
+- The flags (`graph.enabled`, `retrieval.laya.enabled`) are ordinary dotted keys:
+  confirm, then send them through `POST /api/settings` in the form
+  `GET /api/settings` lists. Nothing hot-applies; the response names what to
+  restart (`:8051`, and graph mode also reloads the console page). Verify
+  afterwards instead of assuming.
+- **Laya also needs** the optional `laya` package (deliberately not in
+  `requirements.txt`; the refusal message carries the exact pinned install command)
+  and a checkpoint under `retrieval.laya.model_dir`;
+  `docs/laya-finetune.md` is the manual. Without them the mode is refused with an
+  error naming what is missing, never answered by another reranker. The flag alone
+  does not prove it works: finish with a targeted `/search` using `rerank:"laya"`
+  and read the result.
+- **The relevance gate has no console switch.** Its keys are
+  `retrieval.relevance_gate.{enabled, scorer, threshold}` in `config.yaml`. An
+  enabled gate with no threshold, or an unknown scorer, is a startup error by
+  design (`/health` reports `failed`, with the reason). Do not enable it until the
+  operator has chosen a threshold on the eval's dev split; the per-call `gate` and
+  `gate_threshold` fields on the query API let it be exercised without persisting
+  anything.
+- Experimental means unmeasured. Do not present either feature as an improvement.
 
 ## Queue and monitor jobs
 
@@ -195,12 +227,13 @@ curl.exe -X POST http://127.0.0.1:8052/api/jobs -H "Content-Type: application/js
 
 Use the schema-defined parameters for common operations such as:
 
-- PDF, notebook, code, Markdown, or URL ingest.
+- PDF, notebook, code, Markdown, canvas/graph, or URL ingest.
 - Index append or full rebuild.
 - BM25 rebuild.
 - Scoped HyPE construction.
 - Metadata recalibration.
-- Retrieval evaluation.
+- Retrieval evaluation (the golden-suite `eval` job kind; the bench is a command
+  line tool, not a job kind, see below).
 
 Avoid a full-corpus re-embed or unscoped HyPE build without explicit approval
 and a reason supported by current corpus state. Prefer scoped append and
@@ -219,6 +252,98 @@ and permission tier.
 
 Report the job kind, target, terminal state, relevant counts, and any unresolved
 error. Never describe queued work as complete.
+
+## Ingest a graph lane deliberately
+
+Canvas ingest is not another file type, and the console does not file it as
+one. Two read-only endpoints exist because a graph needs answering questions no
+other lane does:
+
+```cmd
+curl.exe http://127.0.0.1:8052/api/canvas/folders
+curl.exe -X POST http://127.0.0.1:8052/api/canvas/preview -H "Content-Type: application/json" -d "{\"include_path\":\"<folder>\"}"
+```
+
+`folders` reports which vault trees hold canvases, with counts — scope from that
+rather than guessing a path substring. `preview` runs the real loader into a
+scratch file, indexes nothing, and reports the chunk and edge counts, the share
+of chunks that come out carrying edges, the context-inflation cost, and one
+composed sample. Read a preview before queueing an ingest, and report its
+numbers rather than predicting them.
+
+Two things to get right:
+
+- **Stamp the metadata.** Canvas filenames rarely carry a course keyword, so an
+  unscoped run lands chunks as the generic domain. The preview says so
+  explicitly when it would happen. Set `force_domain` / `force_tags`.
+- **A scoped run needs its own output file.** The loader truncates whatever it
+  writes, so a folder-scoped run pointed at the canonical canvas chunk file
+  would shrink it to that folder: the dense index keeps every chunk because
+  append upserts, while the sparse index is re-derived from the chunk files and
+  loses the rest. The job builder refuses that combination; give a scoped run
+  its own file.
+
+`context_depth` above `0` inlines a neighbour's text into each chunk so the
+chunk is self-contained. It duplicates text across chunks and inflates the
+index. Treat it as a re-ingest decision with a measured cost — the preview and
+the ingest log both report the share — not a default worth flipping on.
+
+## Measure retrieval with the eval bench
+
+The bench scores labelled questions per named pipeline configuration. It is a
+command-line tool, not a console job: run `rag bench …` (the launcher forwards
+what it does not know to `python main.py bench …`) in the project environment. It
+builds its own pipeline in-process, so on a small machine do not run it beside the
+warm query API, OCR, or another heavy job.
+
+| Subcommand | Does | State it touches |
+|---|---|---|
+| `bench sample` | Draws seed packs for drafting questions. | Writes `eval/seeds/`. |
+| `bench draft --suite S [--n N]` | Drafts questions from that suite's seed pack with an LLM (provider `freellmapi` unless `--provider`). The model writes the question and its nuggets; the gold locator is read off the seed chunk, never written by the model. Resumable. | Appends to `eval/sets/<suite>.yaml`. Calls the provider, and the warm query API (`/search`, `/chunks/{id}`) for twins and for the unanswerable check. |
+| `bench validate [--write-cache]` | Checks the question sets against the corpus. | Reads only; `--write-cache` writes `<sets>/.review_cache.json` (whole sets directory, so not with `--suites`). |
+| `bench split` | Assigns `dev` / `test` to questions that have none, once. | Rewrites the sets files it changes. |
+| `bench run --configs … [--split …] [--limit N]` | Scores configurations: `ladder`, `loo`, `factorial`, or comma-separated names from `eval/configs.yaml`. | Creates `eval/runs/<id>/`; a sealed split also appends to `eval/test_ledger.jsonl`. |
+| `bench report <run_dir>` | Re-renders a finished run's `report.md`. | Rewrites that file. |
+
+Rules that matter:
+
+- **Confirm before anything that writes.** State what it will do, then proceed on
+  approval. That includes `bench run`, which is slow and RAM-heavy;
+  `--configs factorial` is the largest, so prefer a `--limit` smoke run first.
+- **A draft is not a verified question.** A drafted record keeps
+  `provenance.status: draft` until the operator verifies it in the console's Eval
+  tab. Questions the operator writes carry `author: owner` and are reported apart
+  from `author: draft`. A suite a draft run left short is topped up by running it
+  again (seeds lost to an LLM error are asked again), then by `bench sample` for
+  fresh seeds.
+- **The test split is sealed.** Use `--split dev`, the default. Never pass
+  `--unseal-test`, or `--split test` / `all`, without the operator's explicit,
+  specific approval: every opening is logged to the ledger, and the test split is
+  meant to be looked at once, after configurations and thresholds were chosen on
+  dev. Never edit or delete the ledger or a run record, and never re-run to chase a
+  better test number.
+- **Exit codes.** `2` is a mistake in the command (`ERROR: …` on stderr: unknown
+  suite, missing sets directory, sealed split, nothing to run). `1` means question
+  rows failed (read each `error` in `per_query.jsonl`), or, for `bench validate`,
+  that a gold file or locator does not resolve. Never describe a partial run as
+  complete.
+- **Read the report as written.** A ladder step counts only when its paired 95%
+  interval excludes zero; a suite marked *diag* is a diagnostic; cold rows are left
+  out of the latency percentiles. A configuration that needs an experimental
+  feature (`laya-rerank`, `gate-laya`) fails loudly while the feature is off.
+- **Run records and question sets quote the vault.** Summarise them for the
+  operator; do not paste their text elsewhere.
+
+The review queue is on this API, with the usual tiers. `GET /api/eval/progress`,
+`GET /api/eval/questions` (filters `suite`, `status`, `split`) and
+`GET /api/eval/questions/{qid}` are `read`. `POST /api/eval/questions/{qid}` with
+`{"action": "verify" | "reject" | "edit"}` is `mutating`: it rewrites that suite's
+sets file. Verifying is the operator's check that a drafted question is sound, so
+do not verify, reject or edit on their behalf beyond the exact question and action
+they named. An edit sends the whole replacement `record`, is validated by the same
+schema the bench loads with, and cannot change `id`, `suite` or `split`. These
+endpoints answer with real status codes (`400`, `404`), unlike the query API's
+retrieval knobs.
 
 ## Handle uploads and the inbox
 
@@ -240,6 +365,17 @@ Use `/api/inbox/delete` only for confirmed inbox cleanup. Do not confuse it with
 Discover converted/import candidates through the schema and read endpoints.
 Use the OCR scan endpoint to inspect which pages need OCR before queueing work.
 Use fetch/convert/promote only after resolving exact files and permission tiers.
+
+`POST /api/import/fetch` queues a fetch job whose `backend` is `auto` (the default),
+`requests`, `crawl4ai`, `scrapling` or `crawlee`. `auto` tries crawl4ai, then
+scrapling, then plain `requests`, using whatever is installed, and **never picks
+`crawlee`**: that one is opt-in, by name. It renders the page with Crawlee's
+`PlaywrightCrawler` in Chromium, then runs the same HTML-to-markdown conversion as
+the others (the `format:"pdf"` print path does not use a backend). A backend that
+is not installed, or whose crawl fails, makes the fetch job fail: read the job log,
+report the cause, and let the operator choose another backend instead of retrying
+with a different one yourself. In a container running as root, `crawlee` also needs
+`CRAWLEE_DISABLE_BROWSER_SANDBOX=1` in its environment.
 
 Inspect OCR readiness:
 
@@ -393,6 +529,15 @@ Then verify with `GET :8051/config`, `/providers`, `/stats`, and a targeted
 | Inbox conflict | Inspect duplicates; use force only after explicit confirmation. |
 | Job failed | Read the log, preserve the first causal error, and retry only after correcting it. |
 | `Reranking failed:` | Treat it as retrieval, inspect model/limit/device/HTTP settings, and preserve the underlying error. |
+| `Reranking failed:` naming `retrieval.laya.enabled` | The experimental Laya reranker is off, or its package or checkpoint is missing. Offer the switch (see the experimental-features section) or let the caller pick another mode; never substitute one silently. |
+| `Bad request:`, or an `error` field, on a retrieval call that answered HTTP 200 | A rejected per-call knob, not an outage. Fix the knob; restart nothing. |
+| `/health` reports `failed` right after enabling the relevance gate | An enabled gate with no threshold, or an unknown scorer, is a startup error by design. Set the threshold or turn the gate off. |
+| A `crawlee` fetch job fails | The package or its browser is missing, or, as root in a container, the sandbox flag is unset. It never falls back to another backend; report the cause from the job log. |
+| `bench run` exits `2` or `1` | `2`: a mistake in the command, nothing ran. `1`: some question rows failed; read their `error` in `per_query.jsonl`, and report the run as partial. |
+| `bench draft` exits `1` | Some seeds were skipped on LLM or transport errors; its summary counts them. Nothing written is lost. Run it again: those seeds are asked again. |
+| `/health` reports `failed`: a collection "was embedded by … but the configured embedder is …" | The embedding fingerprint guard: `embedding.*` no longer describes the embedder that built the collection, and searching would compare vectors from two models. Set `embedding.*` back to the recorded one. Never reach for `rag stamp --force` to clear it: its sample check fails on a mismatched collection anyway, and `--force` exists only for a recorded fingerprint the operator confirms is wrong. |
+| Startup log: a collection "has no embedding fingerprint" | It predates fingerprints and is served unchecked. With approval, run `rag stamp` once (`rag stamp --collection <name>` for the HyPE question collection): it re-embeds a sample of stored chunks and records the embedder only if they match their stored vectors. It writes a `<collection>.embedding.json` beside the store and changes no vector. |
+| `bench run` refuses the test split | Working as designed. Do not add `--unseal-test` without the operator's explicit approval. |
 | BGE base fails around long inputs | Ensure its configured maximum is no greater than 512. |
 | HTTP reranker transport/status/schema error | Fix the external service; do not report a provider outage or silently fall back. |
 | Provider key is present but incompatible | Replace it with the declared credential type; never bypass prefix checks. |
@@ -421,6 +566,8 @@ Use `personal-rag` to:
 Use this skill to:
 
 - Change the corpus, metadata, settings, credentials, vault, or service state.
+- Run the eval bench, review its question sets, and switch experimental features
+  on or off.
 - Monitor long-running operational work.
 - Diagnose failures that require configuration or corpus action.
 

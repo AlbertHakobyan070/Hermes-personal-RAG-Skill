@@ -22,7 +22,12 @@ Choose the cheapest adequate operation:
 4. Call `POST /query` for a generated, cited answer after retrieval looks sound.
 5. Call `POST /compare` only when branch-level comparison will clarify a real
    retrieval or generation decision.
-6. Switch to `rag-ops` for corpus or runtime mutation.
+6. Call `POST /graph/expand` when the question is about how ideas CONNECT, and
+   the corpus has a graph lane. See below — it is a separate mode, not a knob,
+   and it is EXPERIMENTAL: check `GET /schema` first. A `503` here means the
+   feature is switched off, not that the call was wrong — fall back to
+   `/search` rather than retrying.
+7. Switch to `rag-ops` for corpus or runtime mutation.
 
 If generation fails, repeat the intent through `/search` and reason over the
 returned chunks. Do not abandon usable local retrieval because a provider is
@@ -102,8 +107,12 @@ core control surface:
 | `omnisearch` | Fuse live-vault results when the configured Obsidian service is available. |
 | `parent_context` | Replace a matched note chunk with its full section. |
 | `neighbor_context` | Add adjacent PDF pages as supplementary context. |
-| `rerank` | Override the method with a mode reported by `/schema`. |
+| `rerank` | Override the method with a mode reported by `/schema`. `laya` is experimental and is listed even when it is off: see "Treat experimental features as off until shown on". |
 | `rerank_instruction` | State the ranking criterion in plain language. Reorders the candidate pool; never filters it. |
+| `lane_weights` | Reweight individual fusion lanes, e.g. `{"sparse": 1.5}`. Merges lane by lane over config and preset; every lane defaults to `1.0`. Read the lane names from `/schema`. |
+| `lanes` | Restrict the call to a subset of the fusion lanes (names from `/schema`). It only restricts: a lane outside the list does not run, and a conditional lane (code, scope, `omnisearch`, `hype`) still needs its own trigger. Use it to isolate a lane while diagnosing, not as a default. |
+| `metadata_boost` | Tri-state: force the course/domain/tag boost on or off for this call; omit it to follow config. |
+| `gate` / `gate_threshold` / `gate_scorer` | The post-rerank relevance gate, off unless configured or forced. See "Skip weak evidence with the relevance gate". Never invent a `gate_threshold`: its units belong to the scorer. |
 | `include_text` | Request an evidence text excerpt. |
 | `max_sources` | Cap returned sources without changing retrieval itself. |
 | `retrieve_only` | Skip generation on `/query` and return evidence. |
@@ -130,6 +139,75 @@ Discover common preset behavior live. Typically:
 Name the domain, course, content type, library, or user tag in the query when it
 matters. Let scope routing and tag boosts act on explicit wording.
 
+### Read a bad knob as a 200 with an error
+
+A retrieval knob with a bad *value* does not return a 4xx, and it is never a
+silent no-op. The call answers HTTP 200 and says what is wrong in the body:
+
+- `/search`: a top-level `error`, with `results: []`.
+- `/query`: `confidence:"ERROR"` with the message in `answer` (`Bad request: …`
+  for a bad value, `Reranking failed: …` for a refused or failed reranker).
+- `/compare`: that branch's `error`, with `retrieval_error:true`. The other
+  branches still ran.
+
+That covers an unknown `preset`, an empty or unknown `lanes` entry, a bad
+`lane_weights` (unknown lane, negative weight), an unknown or refused `rerank`
+mode, and a gate that cannot work. A wrong *type* (`top_k:"ten"`, `lanes:"sparse"`,
+a non-numeric `gate_threshold`) or an out-of-range number is FastAPI's `422`,
+raised before retrieval runs. (`/graph/expand` and `/answer` keep real `400`s.)
+
+Read `error` and `confidence` before reading `results` or `sources`: an empty
+list that carries an `error` is a rejected request, not a coverage gap. Fix the
+knob and say what you changed. Do not resend the same body, and do not make the
+error go away by silently dropping the knob.
+
+### Follow the graph with `POST /graph/expand`
+
+Some corpora carry a hand-drawn graph — nodes the user connected deliberately,
+with labels saying how they relate. Graph mode walks those edges.
+
+**This mode is EXPERIMENTAL and ships off.** `GET /schema` reports whether the
+endpoint is available, which indexed lane holds the graph, and — under
+`experimental.features` — the config key that switches it on. Check that before
+reaching for it; a `503` is the feature being off, and the right response is to
+use `/search`, not to retry or to tell the user the corpus has no graph.
+
+Reach for it when the question is about STRUCTURE — what leads to what, what a
+concept connects to, what a map covers — rather than about content that ordinary
+retrieval already ranks well. Graph content usually competes perfectly well in
+`/search`; this mode exists for DEPTH, following an edge the ranker would never
+have surfaced.
+
+Seed it one of two ways, never both in one call:
+
+- `q` searches the graph lane for its own seeds.
+- `seeds` takes chunk ids from a result you already have, so the walk starts
+  from evidence the user has seen.
+
+Supplying both, or neither, is a `400`. So is an unknown seed id.
+
+No LLM runs. The response carries the nodes, the tree that was walked with each
+edge's label and direction, the edges that loop back onto nodes already reached,
+and `stats.truncated_at` naming the cap that stopped the walk. Report a
+truncation rather than presenting a partial traversal as the whole graph.
+
+Then decide what the nodes are for, and say which you chose:
+
+- Take them as they are. Nothing more is needed for a structural answer.
+- Send them to `POST /answer` for a grounded, cited answer over those documents
+  alone.
+- Send them to `POST /answer` together with the ids from a previous `/search` or
+  `/query`, to answer over both stacks at once.
+
+`POST /answer` runs generation over a document set YOU choose; no retrieval
+happens. An unknown chunk id is a `400`, never a quietly smaller context.
+Evidence ids that are not indexed records — live-vault excerpts and
+parent-expanded sections — cannot ground an answer; drop them and say so.
+
+Prefer offering the user the choice when a traversal is ambiguous. The mode is
+built around a human decision, and silently answering from one set is the one
+behaviour it exists to avoid.
+
 ### State the ranking criterion with `rerank_instruction`
 
 Send `rerank_instruction` when the question alone does not say what makes one
@@ -147,6 +225,7 @@ It is honoured only by the modes that score semantically:
 | `http` | Applied. Sent as one query to the external service. |
 | `lexical` | **Ignored by design.** Lexical scoring is query-term coverage; a sentence of instruction would dilute every real query term. |
 | `none` | Nothing is scored at all. |
+| `laya` | **Ignored by design.** The query goes into the model's own question, the wording its checkpoint was trained on. |
 
 Never infer from the request alone that it took effect. Read the retrieval echo,
 which reports both the criterion and whether it was actually applied:
@@ -158,9 +237,57 @@ curl.exe -X POST http://127.0.0.1:8051/search -H "Content-Type: application/json
 - `retrieval.rerank_instruction` — the criterion that was applied, or `null`.
 - `retrieval.rerank_instruction_applied` — `false` means it changed nothing.
 
-A `false` echo under `lexical` or `none` is correct behaviour, not a fault.
+A `false` echo under `lexical`, `none` or `laya` is correct behaviour, not a fault.
 Send `""` to switch a configured criterion off for one call; omit the field
 entirely to inherit the configured one.
+
+### Skip weak evidence with the relevance gate
+
+The gate is an optional cutoff after the rerank. Chunks scoring below
+`gate_threshold` are dropped before generation (and before parent/neighbor
+expansion), and when none survive `/query` **abstains**: the fixed "nothing
+relevant" answer, `confidence:"LOW"`, no citations or sources, and **no LLM
+call**. The echo's `retrieval.gate` says what it did:
+`{enabled, scorer, threshold, kept, dropped, abstained}`, or `{"enabled":false}`
+when it did not run.
+
+- It is off unless the operator configured it. `gate:true` / `false` forces it
+  for one call, and a `gate_threshold` sent alone turns it on for that call.
+- **Never invent a threshold.** It is in the scorer's own units. The default
+  `rerank_score` scorer reads the active reranker's score (cross-encoder logits,
+  lexical coverage scores and Laya probabilities are different scales), so a
+  number from one reranker means nothing for another. Use a value the operator
+  gave you or the config holds; the operator picks it on the eval's dev split.
+- `gate_scorer` is `rerank_score` (the default) or `laya` (experimental). A scorer
+  other than the configured one needs its own `gate_threshold`.
+- A gate over `rerank:"none"` is an error under the default scorer: `none` scores
+  nothing, and the gate never passes unscored chunks through.
+- An abstain (`retrieval.gate.abstained:true`) is the gate's verdict, not proof
+  that the vault is silent: a threshold set too high produces one too. Re-run
+  `/search` with `gate:false` and look at what was dropped before reporting a
+  coverage gap.
+
+### Treat experimental features as off until shown on
+
+Some features are built and tested but unmeasured, and ship **off**: graph mode
+(`graph.enabled`; `POST /graph/expand` and `POST /answer`) and the Laya reranker
+(`retrieval.laya.enabled`; `rerank:"laya"` and `gate_scorer:"laya"`). Never assume
+one is on, and never describe its output as better than the default: nobody has
+measured that.
+
+- `GET /schema` reports graph mode under `experimental.features`. It does not
+  report Laya: `rerank_modes` lists `laya` whether or not it is enabled, and so
+  does `GET /compare/options`, which marks no rerank branch unavailable. The state
+  of every experimental flag is `GET :8052/api/settings`, `experimental[].on` (the
+  config on disk; a `:8051` restart applies it), which `rag-ops` reads.
+- A refused feature says so. `rerank:"laya"` or `gate_scorer:"laya"` with the flag
+  off, the package missing or no checkpoint comes back as the error described
+  above, naming the flag. It is never answered by another mode. Do not retry with
+  a different one on your own: tell the user what was refused and offer the
+  switch (`rag-ops`, a settings write and a `:8051` restart).
+- Leave `rerank_laya` out of a `/compare` unless the flag is on: its branch fails
+  alone, and the others still run.
+- `rerank_instruction` is ignored by `laya`, as by `lexical` and `none`.
 
 ## Inspect evidence before generation
 
@@ -204,7 +331,7 @@ Inspect:
 - `confidence` for the model's groundedness assessment.
 - `citations` for sources actually cited.
 - `sources` for all evidence shown to generation.
-- `retrieval` for the effective preset, lanes, reranker, and context behavior.
+- `retrieval` for the effective preset, lanes, reranker, gate, timings, and context behavior.
 - `generation` for the resolved backend, protocol, model, and usage metadata.
 
 Present the answer, confidence, and cited labels. Mention important uncited
@@ -212,7 +339,21 @@ evidence separately. Preserve evidence IDs when the result will be compared,
 audited, or revisited.
 
 Treat `confidence:"ERROR"` as an operational result, not an answer. Preserve the
-provider-aware or retrieval-aware error text.
+provider-aware or retrieval-aware error text. A rejected knob looks the same: see
+"Read a bad knob as a 200 with an error".
+
+### Read the retrieval echo
+
+`retrieval` reports what actually ran. Besides the effective settings, these keys
+matter when you are diagnosing or timing a call:
+
+| Key | Read it as |
+|---|---|
+| `timings` | Milliseconds per stage (`hyde`, `embed`, one `lane.<name>` per lane that ran, `fuse`, `rerank`, `gate` when it ran, `total`, …). A missing stage did not run. Generation's own stages are in `generation.timings`. |
+| `lanes_run` | `{lane: candidates returned}` for each lane that ran. Check it before concluding that a lane "found nothing": a lane absent here never ran. |
+| `cold` | `true` means this call loaded the index or a model. Do not quote its `timings` as steady state; repeat the call. |
+| `hyde_cache` | `off`, `bypass` (code intent), `hit` (draft replayed, no LLM call), `miss` (fresh draft, stored), `nocache`, or `error` (the raw query was used). |
+| `gate` | The relevance gate's verdict, above. |
 
 ## Compare a tree of query branches
 
@@ -322,6 +463,11 @@ Do not persistently disable tuned defaults to rescue one weak query. Use
 per-call overrides, evaluate the result, and leave configuration changes to
 `rag-ops`.
 
+Do not generalise from a handful of queries. Whether a change helps across many
+questions is a measurement for the eval bench (`python main.py bench run
+--configs …`), which `rag-ops` owns: it runs on the dev split by default, and
+only the operator opens the sealed test split.
+
 ## Use Omnisearch, tags, and HyPE correctly
 
 Use `omnisearch:true` to fuse currently unindexed vault notes into normal
@@ -342,7 +488,7 @@ were built for only part of the corpus.
 
 Read the active method, model, and maximum length from `GET /config`. Discover
 valid per-call modes from `/schema`; current implementations expose
-`cross_encoder`, `http`, `lexical`, and `none`.
+`cross_encoder`, `http`, `lexical`, and `none`, plus the experimental `laya`.
 
 Treat messages beginning with `Reranking failed:` as retrieval failures, not
 generation-provider outages. Preserve the underlying model, transport, status,
@@ -358,6 +504,8 @@ Use:
 - `lexical` for fast exact-term ranking without model loading.
 - `none` to inspect fused order deliberately.
 - `http` only when the configured external `/v1/rerank` service is reachable.
+- `laya` only when the experimental flag is on. It is refused otherwise, never
+  replaced by another mode.
 
 ## Diagnose generation providers
 
@@ -387,8 +535,12 @@ provider-key workflow.
 | `/health` is ready but generation fails | Inspect `/providers`; retry retrieval through `/search`. |
 | `/health` reports `state:"failed"` | Read `error` and `hint`; hand to `rag-ops` with `GET /api/service/log`. Do not retry the 503. |
 | `Reranking failed:` | Inspect `/config`; fix the reranker model, limit, device, or HTTP service through `rag-ops`. |
+| `Reranking failed:` naming `retrieval.laya.enabled` | The experimental Laya reranker is off. Choose another mode explicitly, or offer the switch through `rag-ops`. Do not retry. |
+| `confidence:"ERROR"` starting `Bad request:`, or an `error` on `/search` | A rejected knob, not an outage. Read the message, fix the knob, and say so. |
+| `LOW` with `retrieval.gate.abstained:true` | The relevance gate dropped everything. Re-run `/search` with `gate:false` to see what it removed before reporting a coverage gap. |
+| `retrieval.cold:true` | The call loaded the index or a model. Its `timings` are not steady state; repeat it. |
 | Right topic, wrong kind of material | Send `rerank_instruction`; verify `rerank_instruction_applied:true`. |
-| `rerank_instruction_applied:false` | The mode is `lexical` or `none`, which ignore it. Switch to `cross_encoder` or `http`. |
+| `rerank_instruction_applied:false` | The mode is `lexical`, `none` or `laya`, which ignore it. Switch to `cross_encoder` or `http`. |
 | Expected source absent from `/search` | Widen candidate pools, name scope/tags, try HyPE, and rephrase. |
 | Relevant source appears below cutoff | Raise `top_k`. |
 | Relevant evidence is fragmentary | Enable parent/neighbor context or use a synthesis preset. |
@@ -407,6 +559,8 @@ Keep query-time reads and bounded comparisons in this skill. Use `rag-ops` for:
 - Persistent settings and provider-secret changes.
 - Vault switching and service restart.
 - Long-running job monitoring and corpus integrity checks.
+- Running the eval bench, reviewing its question sets, and switching experimental
+  features on or off.
 
 Never mutate corpus or runtime state merely because a query is weak. Diagnose
 retrieval first, then propose the smallest appropriate operation.
