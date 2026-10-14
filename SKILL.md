@@ -5,6 +5,8 @@ description: Retrieve grounded, cited answers from a configured Obsidian-vault R
 
 # Personal RAG
 
+Noetrix version: 0.28.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
+
 Drive the warm query API on `http://127.0.0.1:8051` through JSON. Prefer the
 API to browser automation or a cold one-shot CLI. Keep every substantive claim
 grounded in returned evidence, preserve citation labels, and report coverage
@@ -35,31 +37,44 @@ unavailable.
 
 ## Start and probe the service
 
-Activate the project's configured environment, enter its root, and prefer its
-launcher:
+Start it the way this install runs:
 
-```cmd
-rag serve
-```
+- **Docker archive:** the launcher in the archive root starts both servers and
+  waits until they are ready: `sh start.sh` on macOS and Linux,
+  `powershell -ExecutionPolicy Bypass -File start.ps1` on Windows. A remapped
+  port is in the archive's `.env` (`NOETRIX_API_PORT`).
+- **Windows checkout:** `rag serve` from the project root; the launcher picks
+  the project environment.
+- **Any other checkout:** activate the project environment, enter its root, and
+  run:
 
-Use an explicit start only when the launcher is unavailable:
-
-```cmd
+```sh
 python -m uvicorn serve_api:app --host 127.0.0.1 --port 8051
 ```
 
-Probe readiness and discovery:
+Probe readiness and discovery. The `curl` commands in this playbook run as written in bash, zsh and
+`cmd.exe`. In Windows PowerShell, type `curl.exe` (plain `curl` there is an alias
+for `Invoke-WebRequest`), and send a JSON body with `Invoke-RestMethod` and a
+single-quoted `-Body`: PowerShell's quoting breaks the escaped JSON shown here.
 
-```cmd
-curl.exe http://127.0.0.1:8051/health
-curl.exe http://127.0.0.1:8051/schema
-curl.exe http://127.0.0.1:8051/config
-curl.exe http://127.0.0.1:8051/providers
-curl.exe http://127.0.0.1:8051/stats
+```sh
+curl http://127.0.0.1:8051/health
+curl http://127.0.0.1:8051/schema
+curl http://127.0.0.1:8051/config
+curl http://127.0.0.1:8051/providers
+curl http://127.0.0.1:8051/stats
 ```
 
 Read `/stats` for live corpus totals. Never quote a count copied into this
 playbook.
+
+`/stats` also carries `latency`: p50/p95 per endpoint, total and per stage,
+over the calls the API has served since its last restart. Read it before a
+costly call and price the call first: `stages_ms` shows which stage dominates
+(on a CPU-only host it is usually `rerank`), and `rerank: "none"` on `/search`
+is the fast path when breadth matters more than order, such as a related-notes
+sweep. It is empty right after a restart, and a p95 over a few calls is a rough
+guide, not a promise. Never quote a latency copied into this playbook either.
 
 Read `state` on `/health`, not just `ready`. It separates the two not-ready
 cases that are otherwise indistinguishable from outside:
@@ -76,13 +91,13 @@ failure, and never retry it as if it were one.
 
 ## Send JSON safely
 
-Use escaped JSON with `curl.exe` in `cmd.exe`:
+Use escaped JSON with `curl` in bash, zsh or `cmd.exe`:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8051/query -H "Content-Type: application/json" -d "{\"q\":\"Explain regularization from my notes\"}"
+```sh
+curl -X POST http://127.0.0.1:8051/query -H "Content-Type: application/json" -d "{\"q\":\"Explain regularization from my notes\"}"
 ```
 
-Use `Invoke-RestMethod` with a single-quoted body in PowerShell:
+Use `Invoke-RestMethod` with a single-quoted body in Windows PowerShell:
 
 ```powershell
 Invoke-RestMethod -Uri http://127.0.0.1:8051/query -Method Post `
@@ -230,8 +245,8 @@ It is honoured only by the modes that score semantically:
 Never infer from the request alone that it took effect. Read the retrieval echo,
 which reports both the criterion and whether it was actually applied:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8051/search -H "Content-Type: application/json" -d "{\"q\":\"confidence interval for a regression coefficient\",\"rerank_instruction\":\"prefer worked step-by-step procedures over definitions\"}"
+```sh
+curl -X POST http://127.0.0.1:8051/search -H "Content-Type: application/json" -d "{\"q\":\"confidence interval for a regression coefficient\",\"rerank_instruction\":\"prefer worked step-by-step procedures over definitions\"}"
 ```
 
 - `retrieval.rerank_instruction` — the criterion that was applied, or `null`.
@@ -293,8 +308,8 @@ measured that.
 
 Use `/search` for cheap tuning and agent-side reasoning:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8051/search -H "Content-Type: application/json" -d "{\"q\":\"conjugate priors in my homework\",\"preset\":\"concept\",\"include_text\":1200}"
+```sh
+curl -X POST http://127.0.0.1:8051/search -H "Content-Type: application/json" -d "{\"q\":\"conjugate priors in my homework\",\"preset\":\"concept\",\"include_text\":1200}"
 ```
 
 Read each source as an evidence record:
@@ -310,8 +325,8 @@ Read each source as an evidence record:
 
 Fetch a lookup-capable record without searching again:
 
-```cmd
-curl.exe "http://127.0.0.1:8051/chunks/<evidence-id>?include_text=2000"
+```sh
+curl "http://127.0.0.1:8051/chunks/<evidence-id>?include_text=2000"
 ```
 
 Do not dereference a live evidence ID. Use its label, path metadata, and excerpt
@@ -321,8 +336,8 @@ from the original response.
 
 Call `/query` after verifying that retrieval is relevant:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8051/query -H "Content-Type: application/json" -d "{\"q\":\"How do my notes connect bias and variance?\",\"preset\":\"synthesis\"}"
+```sh
+curl -X POST http://127.0.0.1:8051/query -H "Content-Type: application/json" -d "{\"q\":\"How do my notes connect bias and variance?\",\"preset\":\"synthesis\"}"
 ```
 
 Inspect:
@@ -363,8 +378,8 @@ Call `GET /compare/options` first. It returns ready-to-post branch objects, so
 stop hand-assembling them from `/schema` presets, `/schema` rerank modes and
 `/providers`, and stop re-deriving the branch caps from prose:
 
-```cmd
-curl.exe http://127.0.0.1:8051/compare/options
+```sh
+curl http://127.0.0.1:8051/compare/options
 ```
 
 - `branch_limits` — the real `min`, `search` and `query` caps, as enforced.
@@ -382,14 +397,14 @@ Read branch limits and allowed fields from `/schema` only when you need a field
 
 Compare retrieval without spending generation tokens:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8051/compare -H "Content-Type: application/json" -d "{\"q\":\"How did I use distillation?\",\"mode\":\"search\",\"branches\":[{\"id\":\"baseline\",\"label\":\"Config baseline\",\"auto_preset\":false},{\"id\":\"concept\",\"preset\":\"concept\"},{\"id\":\"lexical\",\"rerank\":\"lexical\"}]}"
+```sh
+curl -X POST http://127.0.0.1:8051/compare -H "Content-Type: application/json" -d "{\"q\":\"How did I use distillation?\",\"mode\":\"search\",\"branches\":[{\"id\":\"baseline\",\"label\":\"Config baseline\",\"auto_preset\":false},{\"id\":\"concept\",\"preset\":\"concept\"},{\"id\":\"lexical\",\"rerank\":\"lexical\"}]}"
 ```
 
 Use query mode only when comparing generated answers:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8051/compare -H "Content-Type: application/json" -d "{\"q\":\"Summarize my approach\",\"mode\":\"query\",\"branches\":[{\"id\":\"default\",\"label\":\"Default provider\"},{\"id\":\"alternate\",\"label\":\"Alternate provider\",\"provider\":\"<configured-provider>\"}]}"
+```sh
+curl -X POST http://127.0.0.1:8051/compare -H "Content-Type: application/json" -d "{\"q\":\"Summarize my approach\",\"mode\":\"query\",\"branches\":[{\"id\":\"default\",\"label\":\"Default provider\"},{\"id\":\"alternate\",\"label\":\"Alternate provider\",\"provider\":\"<configured-provider>\"}]}"
 ```
 
 Compare:
@@ -473,8 +488,8 @@ only the operator opens the sealed test split.
 Use `omnisearch:true` to fuse currently unindexed vault notes into normal
 retrieval. Use the raw passthrough only for a direct live-vault lookup:
 
-```cmd
-curl.exe "http://127.0.0.1:8051/omnisearch?q=<url-encoded-query>&k=5"
+```sh
+curl "http://127.0.0.1:8051/omnisearch?q=<url-encoded-query>&k=5"
 ```
 
 Report an unavailable live service explicitly. Do not imply that indexed

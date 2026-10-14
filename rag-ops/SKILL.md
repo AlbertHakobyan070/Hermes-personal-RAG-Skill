@@ -5,6 +5,8 @@ description: "Operate and diagnose a configured personal-RAG corpus through its 
 
 # RAG Operations
 
+Noetrix version: 0.28.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
+
 Drive the management API on `http://127.0.0.1:8052` through JSON. Use the query
 API on `http://127.0.0.1:8051` only for read-side diagnostics and verification.
 Prefer API calls to browser automation.
@@ -29,27 +31,33 @@ remove indexed records and derived data.
 
 ## Start and discover the console
 
-Activate the project's configured environment, enter its root, and start:
+Start it the way this install runs:
 
-```cmd
-rag console
-```
+- **Docker archive:** the launcher in the archive root starts both servers and
+  waits until they are ready: `sh start.sh` on macOS and Linux,
+  `powershell -ExecutionPolicy Bypass -File start.ps1` on Windows. A remapped
+  port is in the archive's `.env` (`NOETRIX_CONSOLE_PORT`).
+- **Windows checkout:** `rag console` from the project root; the launcher picks
+  the project environment.
+- **Any other checkout:** activate the project environment, enter its root, and
+  run:
 
-Use an explicit start only when the launcher is unavailable:
-
-```cmd
+```sh
 python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052
 ```
 
-Probe the management and query surfaces:
+Probe the management and query surfaces. The `curl` commands in this playbook run as written in bash, zsh and
+`cmd.exe`. In Windows PowerShell, type `curl.exe` (plain `curl` there is an alias
+for `Invoke-WebRequest`), and send a JSON body with `Invoke-RestMethod` and a
+single-quoted `-Body`: PowerShell's quoting breaks the escaped JSON shown here.
 
-```cmd
-curl.exe http://127.0.0.1:8052/api/schema
-curl.exe http://127.0.0.1:8052/api/overview
-curl.exe http://127.0.0.1:8051/health
-curl.exe http://127.0.0.1:8051/config
-curl.exe http://127.0.0.1:8051/providers
-curl.exe http://127.0.0.1:8051/schema
+```sh
+curl http://127.0.0.1:8052/api/schema
+curl http://127.0.0.1:8052/api/overview
+curl http://127.0.0.1:8051/health
+curl http://127.0.0.1:8051/config
+curl http://127.0.0.1:8051/providers
+curl http://127.0.0.1:8051/schema
 ```
 
 Read live schemas instead of copying endpoint limits, job parameters, provider
@@ -59,13 +67,13 @@ names, counts, or preset names into this playbook.
 
 Use the read layer to resolve exact state:
 
-```cmd
-curl.exe http://127.0.0.1:8052/api/overview
-curl.exe "http://127.0.0.1:8052/api/documents?q=<term>&limit=20"
-curl.exe http://127.0.0.1:8052/api/facets
-curl.exe "http://127.0.0.1:8052/api/vault/search?q=<url-encoded-query>"
-curl.exe "http://127.0.0.1:8052/api/documents/preview?source_file=<source-key>&n=3"
-curl.exe http://127.0.0.1:8052/api/jobs
+```sh
+curl http://127.0.0.1:8052/api/overview
+curl "http://127.0.0.1:8052/api/documents?q=<term>&limit=20"
+curl http://127.0.0.1:8052/api/facets
+curl "http://127.0.0.1:8052/api/vault/search?q=<url-encoded-query>"
+curl "http://127.0.0.1:8052/api/documents/preview?source_file=<source-key>&n=3"
+curl http://127.0.0.1:8052/api/jobs
 ```
 
 Use exact `source_file` keys returned by `/api/documents` for preview, retag, and
@@ -139,8 +147,8 @@ state.
 
 Read editable fields, current values, allowed choices, and restart requirements:
 
-```cmd
-curl.exe http://127.0.0.1:8052/api/settings
+```sh
+curl http://127.0.0.1:8052/api/settings
 ```
 
 Confirm the mutation, then send only intended dotted keys to
@@ -152,8 +160,8 @@ Switching reranker is a config write plus a `:8051` restart, and every way it
 can go wrong used to look identical from the console — the restart simply never
 reported ready:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8052/api/rerank/check -H "Content-Type: application/json" -d "{\"model\":\"BAAI/bge-reranker-v2-m3\"}"
+```sh
+curl -X POST http://127.0.0.1:8052/api/rerank/check -H "Content-Type: application/json" -d "{\"model\":\"BAAI/bge-reranker-v2-m3\"}"
 ```
 
 It downloads nothing. Read:
@@ -221,8 +229,8 @@ config `key` that switches it, a `label`, `what` it does, `why_off`, what stays
 Read `job_kinds` from `/api/schema`. Confirm mutating work, then enqueue one
 specific job:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8052/api/jobs -H "Content-Type: application/json" -d "{\"kind\":\"<job-kind>\",\"params\":{}}"
+```sh
+curl -X POST http://127.0.0.1:8052/api/jobs -H "Content-Type: application/json" -d "{\"kind\":\"<job-kind>\",\"params\":{}}"
 ```
 
 Use the schema-defined parameters for common operations such as:
@@ -239,12 +247,28 @@ Avoid a full-corpus re-embed or unscoped HyPE build without explicit approval
 and a reason supported by current corpus state. Prefer scoped append and
 metadata operations.
 
-Poll and tail the returned job ID:
+Wait on the returned job ID with one long-poll call instead of a polling loop:
 
-```cmd
-curl.exe http://127.0.0.1:8052/api/jobs/<job-id>
-curl.exe "http://127.0.0.1:8052/api/jobs/<job-id>/log?offset=0"
+```sh
+curl "http://127.0.0.1:8052/api/jobs/<job-id>/log?tail=40&wait=30"
+curl "http://127.0.0.1:8052/api/jobs/<job-id>/log?offset=<offset-from-last-read>&wait=30"
 ```
+
+`wait` (0-60 seconds) returns as soon as the log grows or the job's status
+changes, and at once for a job that is no longer queued or running. `tail`
+(0-500) returns the last N lines as a terminal shows them, with an `offset` to
+resume from. Every response carries `job`, the job record with:
+
+- `elapsed_s`, and `queue_position` while queued (1 = next).
+- `progress`: `{done, total, line}` of the CURRENT phase, read from the log (a
+  file, a page, a BM25 bar). Quote the line; never present it as the whole
+  job's percentage.
+- `typical`: `{median_s, runs}` over this job kind's past successful runs, and
+  `eta_s` derived from it. Both are null with no history, and `eta_s` is null
+  once the job is past its usual time. Report an ETA as "usually takes about X
+  (from N runs)", never as a promise: runs of one kind differ in size.
+
+`GET /api/jobs/<job-id>` returns the same record without the log.
 
 Continue until the job reaches a terminal state. Read the log before retrying.
 Use retry or cancel only through the corresponding schema-documented endpoint
@@ -259,9 +283,9 @@ Canvas ingest is not another file type, and the console does not file it as
 one. Two read-only endpoints exist because a graph needs answering questions no
 other lane does:
 
-```cmd
-curl.exe http://127.0.0.1:8052/api/canvas/folders
-curl.exe -X POST http://127.0.0.1:8052/api/canvas/preview -H "Content-Type: application/json" -d "{\"include_path\":\"<folder>\"}"
+```sh
+curl http://127.0.0.1:8052/api/canvas/folders
+curl -X POST http://127.0.0.1:8052/api/canvas/preview -H "Content-Type: application/json" -d "{\"include_path\":\"<folder>\"}"
 ```
 
 `folders` reports which vault trees hold canvases, with counts — scope from that
@@ -291,8 +315,8 @@ the ingest log both report the share — not a default worth flipping on.
 ## Measure retrieval with the eval bench
 
 The bench scores labelled questions per named pipeline configuration. It is a
-command-line tool, not a console job: run `rag bench …` (the launcher forwards
-what it does not know to `python main.py bench …`) in the project environment. It
+command-line tool, not a console job: run `python main.py bench …` in the project
+environment (`rag bench …` with the Windows launcher, which forwards to it). It
 builds its own pipeline in-process, so on a small machine do not run it beside the
 warm query API, OCR, or another heavy job.
 
@@ -349,8 +373,8 @@ retrieval knobs.
 
 Inspect `/api/inbox` before ingesting. Upload only user-approved files:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8052/api/upload -F "files=@<local-file>"
+```sh
+curl -X POST http://127.0.0.1:8052/api/upload -F "files=@<local-file>"
 ```
 
 Use `POST /api/ingest_inbox` with schema-defined metadata, chunking, OCR, and
@@ -379,8 +403,8 @@ with a different one yourself. In a container running as root, `crawlee` also ne
 
 Inspect OCR readiness:
 
-```cmd
-curl.exe http://127.0.0.1:8052/api/ocr/status
+```sh
+curl http://127.0.0.1:8052/api/ocr/status
 ```
 
 The PaddleOCR lane has **three** states, not two, and collapsing them produces
@@ -450,8 +474,8 @@ the host cannot support them.
 Resolve exact source keys and preview representative chunks. Confirm the
 metadata mutation, then call:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8052/api/documents/retag -H "Content-Type: application/json" -d "{\"source_files\":[\"<source-key>\"],\"add_tags\":[\"<tag>\"]}"
+```sh
+curl -X POST http://127.0.0.1:8052/api/documents/retag -H "Content-Type: application/json" -d "{\"source_files\":[\"<source-key>\"],\"add_tags\":[\"<tag>\"]}"
 ```
 
 Use only schema-supported domain, course, add-tag, and remove-tag fields. Report
@@ -470,8 +494,8 @@ Before deletion:
 
 Then call:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8052/api/documents/delete -H "Content-Type: application/json" -d "{\"source_files\":[\"<source-key>\"]}"
+```sh
+curl -X POST http://127.0.0.1:8052/api/documents/delete -H "Content-Type: application/json" -d "{\"source_files\":[\"<source-key>\"]}"
 ```
 
 Report dense, sparse, and JSONL effects returned by the endpoint. Stop on any
@@ -492,8 +516,8 @@ After an operation that changes indexes, loaded metadata, provider credentials,
 or restart-required settings, confirm and call the management restart endpoint
 reported by `/api/schema`, typically:
 
-```cmd
-curl.exe -X POST http://127.0.0.1:8052/api/service/restart
+```sh
+curl -X POST http://127.0.0.1:8052/api/service/restart
 ```
 
 Poll `GET :8051/health` and read its `state`, not only `ready`:
@@ -511,8 +535,8 @@ crash-looping under the supervisor while `/health` answers nothing at all.
 When a restart comes back but never reports ready, tail the startup log rather
 than guessing:
 
-```cmd
-curl.exe "http://127.0.0.1:8052/api/service/log?lines=120"
+```sh
+curl "http://127.0.0.1:8052/api/service/log?lines=120"
 ```
 
 This is the other half of the restart lane. Quote the first causal error from
@@ -536,7 +560,7 @@ Then verify with `GET :8051/config`, `/providers`, `/stats`, and a targeted
 | `bench run` exits `2` or `1` | `2`: a mistake in the command, nothing ran. `1`: some question rows failed; read their `error` in `per_query.jsonl`, and report the run as partial. |
 | `bench draft` exits `1` | Some seeds were skipped on LLM or transport errors; its summary counts them. Nothing written is lost. Run it again: those seeds are asked again. |
 | `/health` reports `failed`: a collection "was embedded by … but the configured embedder is …" | The embedding fingerprint guard: `embedding.*` no longer describes the embedder that built the collection, and searching would compare vectors from two models. Set `embedding.*` back to the recorded one. Never reach for `rag stamp --force` to clear it: its sample check fails on a mismatched collection anyway, and `--force` exists only for a recorded fingerprint the operator confirms is wrong. |
-| Startup log: a collection "has no embedding fingerprint" | It predates fingerprints and is served unchecked. With approval, run `rag stamp` once (`rag stamp --collection <name>` for the HyPE question collection): it re-embeds a sample of stored chunks and records the embedder only if they match their stored vectors. It writes a `<collection>.embedding.json` beside the store and changes no vector. |
+| Startup log: a collection "has no embedding fingerprint" | It predates fingerprints and is served unchecked. With approval, run `python main.py stamp` once (`rag stamp` with the Windows launcher; add `--collection <name>` for the HyPE question collection): it re-embeds a sample of stored chunks and records the embedder only if they match their stored vectors. It writes a `<collection>.embedding.json` beside the store and changes no vector. |
 | `bench run` refuses the test split | Working as designed. Do not add `--unseal-test` without the operator's explicit approval. |
 | BGE base fails around long inputs | Ensure its configured maximum is no greater than 512. |
 | HTTP reranker transport/status/schema error | Fix the external service; do not report a provider outage or silently fall back. |
