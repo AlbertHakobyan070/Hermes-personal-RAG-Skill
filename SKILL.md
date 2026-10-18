@@ -5,7 +5,7 @@ description: Retrieve grounded, cited answers from a configured Obsidian-vault R
 
 # Personal RAG
 
-Noetrix version: 0.28.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
+Noetrix version: 0.29.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
 
 Drive the warm query API on `http://127.0.0.1:8051` through JSON. Prefer the
 API to browser automation or a cold one-shot CLI. Keep every substantive claim
@@ -67,6 +67,16 @@ curl http://127.0.0.1:8051/stats
 
 Read `/stats` for live corpus totals. Never quote a count copied into this
 playbook.
+
+If the operator has set `RAG_API_TOKEN`, every call except `GET /health` needs
+`Authorization: Bearer <token>`: add `-H "Authorization: Bearer $RAG_API_TOKEN"`
+to each `curl` call (`%RAG_API_TOKEN%` in `cmd.exe`). A `401` names the token as
+the cause. Read it from the environment; never ask for it in chat or echo it.
+
+When the Noetrix MCP server is connected, prefer its tools to raw HTTP:
+`noetrix_search`, `noetrix_query`, `noetrix_compare`, `noetrix_get_chunk` and
+the rest call these same endpoints, validate arguments first and send the
+token themselves. Setup is in the project's `docs/mcp.md`.
 
 `/stats` also carries `latency`: p50/p95 per endpoint, total and per stage,
 over the calls the API has served since its last restart. Read it before a
@@ -461,8 +471,9 @@ Climb this ladder only while each step adds value:
    enters the candidate set.
 5. Raise `top_k` when the expected source appears but falls below the final
    cutoff.
-6. Force `hyde:true` for paraphrased conceptual questions; try `hyde:false` for
-   code and exact-term hunts when expansion adds prose bias.
+6. Send `hyde:true` for paraphrased conceptual questions (HyDE is off by
+   default and in every preset); keep it off for code and exact-term hunts,
+   where expansion adds prose bias.
 7. Try `hype:true` when user wording differs from document wording.
 8. Add `parent_context` or `neighbor_context` when evidence is relevant but
    fragmentary.
@@ -559,7 +570,7 @@ provider-key workflow.
 | Expected source absent from `/search` | Widen candidate pools, name scope/tags, try HyPE, and rephrase. |
 | Relevant source appears below cutoff | Raise `top_k`. |
 | Relevant evidence is fragmentary | Enable parent/neighbor context or use a synthesis preset. |
-| Code query returns lecture prose | Use a code preset, explicit code wording, or `hyde:false`. |
+| Code query returns lecture prose | Use a code preset or explicit code wording; if HyDE is on, send `hyde:false`. |
 | Answer truncates before citations/confidence | Raise or omit `max_tokens`. |
 | High confidence but irrelevant citations | Treat retrieval as wrong; retune instead of trusting the label. |
 | Live evidence cannot be fetched from `/chunks` | Respect `lookup_available:false`; use the returned excerpt/path. |

@@ -5,7 +5,7 @@ description: "Operate and diagnose a configured personal-RAG corpus through its 
 
 # RAG Operations
 
-Noetrix version: 0.28.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
+Noetrix version: 0.29.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
 
 Drive the management API on `http://127.0.0.1:8052` through JSON. Use the query
 API on `http://127.0.0.1:8051` only for read-side diagnostics and verification.
@@ -62,6 +62,19 @@ curl http://127.0.0.1:8051/schema
 
 Read live schemas instead of copying endpoint limits, job parameters, provider
 names, counts, or preset names into this playbook.
+
+If the operator has set `RAG_API_TOKEN`, every call except `GET /health` needs
+`Authorization: Bearer <token>`: add `-H "Authorization: Bearer $RAG_API_TOKEN"`
+to each `curl` call (`%RAG_API_TOKEN%` in `cmd.exe`). A `401` names the token as
+the cause. Read it from the environment; never ask for it in chat or echo it,
+and never set it through the API: it lives only in `.env`.
+
+When the Noetrix MCP server is connected, prefer its tools to raw HTTP. They
+call these same endpoints, carry each one's permission tier, and ask before
+every mutating or destructive call: `noetrix_documents`, `noetrix_ingest`,
+`noetrix_job`, `noetrix_engines` and `noetrix_set_engine` by name, everything
+else through `noetrix_read`, `noetrix_change` and `noetrix_remove`. Setup is in
+the project's `docs/mcp.md`.
 
 ## Inspect before changing
 
@@ -240,8 +253,10 @@ Use the schema-defined parameters for common operations such as:
 - BM25 rebuild.
 - Scoped HyPE construction.
 - Metadata recalibration.
-- Retrieval evaluation (the golden-suite `eval` job kind; the bench is a command
-  line tool, not a job kind, see below).
+- The graph-mode seed embedder build (`graph_embed`, see the graph lane below).
+
+Retrieval evaluation is not a job kind: the bench is a command line tool (see
+below).
 
 Avoid a full-corpus re-embed or unscoped HyPE build without explicit approval
 and a reason supported by current corpus state. Prefer scoped append and
@@ -311,6 +326,44 @@ Two things to get right:
 chunk is self-contained. It duplicates text across chunks and inflates the
 index. Treat it as a re-ingest decision with a measured cost — the preview and
 the ingest log both report the share — not a default worth flipping on.
+
+`#tags` written in an edge label become `tags` of both endpoint chunks on that
+canvas's next ingest only while `canvas.label_tags` is true. The flag changes
+metadata, never chunk ids or text.
+
+To take one canvas out of the index, use the deletion flow below with its
+`source_file`. The vault file stays, and :8051 forgets the chunks only after a
+restart.
+
+`POST /api/canvas/suggest_label` asks a language model for one edge's label,
+relation, tags and alternatives, from the canvas posted in the body. It writes
+nothing: a label reaches the file only through `POST /api/canvas/file`. It
+does call a model, and a hosted one may bill, so it is tiered `mutating`.
+Report the `backend` and routed `model` it answered with. `GET
+/api/canvas/suggest_options` lists the backends, their key status and which
+ones read images (`vision`).
+
+### A graph-only seed embedder
+
+`graph.embedding_provider` (null by default) names an embedder for graph
+mode's query seeding. Seeding then reads a canvas-only collection,
+`<collection>__graph`, which the `graph_embed` job builds. Read its state
+before and after any change:
+
+```sh
+curl http://127.0.0.1:8052/api/canvas/embedder
+```
+
+Report the `verdict` (`off`, `missing`, `building`, `mismatch`, `stale`,
+`ready` or `error`) and its `reason` as given.
+
+- `graph_embed` drops and rebuilds that collection from scratch.
+- It never writes the main collection or a chunk file.
+- It is refused while the key is null, unknown or names the main embedder.
+- `POST /api/canvas/reindex` queues it after its append when the key is set.
+- Restart :8051 after a build. Until then, a warm :8051 answers a query-seeded
+  `POST /graph/expand` with the reason, while `/query`, `/search` and seeding
+  by chunk id keep working.
 
 ## Measure retrieval with the eval bench
 
@@ -383,6 +436,14 @@ duplicates, not as permission to force ingest.
 
 Use `/api/inbox/delete` only for confirmed inbox cleanup. Do not confuse it with
 `/api/documents/delete`, which removes indexed records.
+
+`/api/inbox/delete` deletes files from disk. To take a document out of the OCR
+queue without deleting it, call `POST /api/ocrstudio/remove` with a path that
+`/api/ocrstudio/files` lists as an import or an inbox PDF or image.
+- It moves the file into the vault's `.trash`. Moving the file back restores
+  it, together with its OCR Studio work.
+- It answers 409 while the file is indexed.
+- It is tiered `destructive`: confirm the exact file first.
 
 ## Use the import and OCR surfaces
 
