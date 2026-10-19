@@ -5,7 +5,7 @@ description: Retrieve grounded, cited answers from a configured Obsidian-vault R
 
 # Personal RAG
 
-Noetrix version: 0.29.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
+Noetrix version: 0.29.1. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
 
 Drive the warm query API on `http://127.0.0.1:8051` through JSON. Prefer the
 API to browser automation or a cold one-shot CLI. Keep every substantive claim

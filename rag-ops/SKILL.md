@@ -5,7 +5,7 @@ description: "Operate and diagnose a configured personal-RAG corpus through its 
 
 # RAG Operations
 
-Noetrix version: 0.29.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
+Noetrix version: 0.29.1. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
 
 Drive the management API on `http://127.0.0.1:8052` through JSON. Use the query
 API on `http://127.0.0.1:8051` only for read-side diagnostics and verification.
