@@ -5,7 +5,7 @@ description: "Operate and diagnose a configured personal-RAG corpus through its 
 
 # RAG Operations
 
-Noetrix version: 0.29.1. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
+Noetrix version: 0.30.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
 
 Drive the management API on `http://127.0.0.1:8052` through JSON. Use the query
 API on `http://127.0.0.1:8051` only for read-side diagnostics and verification.
@@ -254,6 +254,31 @@ Use the schema-defined parameters for common operations such as:
 - Scoped HyPE construction.
 - Metadata recalibration.
 - The graph-mode seed embedder build (`graph_embed`, see the graph lane below).
+- The route pointer sidecar (`route_pointers`, see below).
+
+`route_pointers` (`mutating`, no parameters) rebuilds
+`retrieval.route.pointers_file`, the map from each generated chunk to the
+primary pages it cites, which `generated_mode: route` reads. It reads the chunk
+JSONLs and the vault and never writes a store; `python main.py route-pointers`
+does the same from the command line. Run it, with approval:
+
+- after an ingest that adds or changes generated content (maps, summaries);
+- after a `provenance.generated_paths` edit and the `stamp-provenance` run that
+  follows it, since either changes which rows are generated;
+- in each vault after a vault switch. A switch applies nothing until `:8051`
+  restarts, so restart it onto the target vault first. Then run the job when
+  `GET :8051/health` shows `route` with a null `sidecar` and nonzero
+  `generated_rows`. Under a configured `route`, such a vault instead shows
+  `/health` `failed` with `RouteUnavailableError` (see the troubleshooting
+  table). The sidecar path is a per-vault setting, so one vault's file never
+  serves another.
+
+`:8051` loads the sidecar only at startup, so restart it after the job. The
+restart is automatic when `webui.auto_restart_rag` is on, which it is not by
+default. Then read `route` on `/health`: `sidecar` names the loaded file, and
+`with_pointers` counts the generated rows it routes. Agent files and rows with
+no readable cite stay unrouted by design, so `with_pointers` below
+`generated_rows` is normal.
 
 Retrieval evaluation is not a job kind: the bench is a command line tool (see
 below).
@@ -571,6 +596,14 @@ Verify the target identity and paths returned by the API before confirming.
 Treat forgetting a registration separately from deleting source data or indexed
 documents. Follow the exact semantics reported by `/api/schema`.
 
+Each vault keeps its own route sidecar (`retrieval.route.pointers_file`). A
+switch applies nothing until `:8051` restarts, and until then `/health`
+describes the previous vault. So restart `:8051` onto the target vault first,
+then read `route` on `GET :8051/health`. If the target vault has no sidecar,
+offer the `route_pointers` job there (see the jobs section). Under a configured
+`route`, such a vault shows `/health` `failed` with `RouteUnavailableError`
+instead.
+
 ## Restart and verify the warm query API
 
 After an operation that changes indexes, loaded metadata, provider credentials,
@@ -622,6 +655,9 @@ Then verify with `GET :8051/config`, `/providers`, `/stats`, and a targeted
 | `bench draft` exits `1` | Some seeds were skipped on LLM or transport errors; its summary counts them. Nothing written is lost. Run it again: those seeds are asked again. |
 | `/health` reports `failed`: a collection "was embedded by … but the configured embedder is …" | The embedding fingerprint guard: `embedding.*` no longer describes the embedder that built the collection, and searching would compare vectors from two models. Set `embedding.*` back to the recorded one. Never reach for `rag stamp --force` to clear it: its sample check fails on a mismatched collection anyway, and `--force` exists only for a recorded fingerprint the operator confirms is wrong. |
 | Startup log: a collection "has no embedding fingerprint" | It predates fingerprints and is served unchecked. With approval, run `python main.py stamp` once (`rag stamp` with the Windows launcher; add `--collection <name>` for the HyPE question collection): it re-embeds a sample of stored chunks and records the embedder only if they match their stored vectors. It writes a `<collection>.embedding.json` beside the store and changes no vector. |
+| `/health` reports `failed` with `UnstampedProvenanceError` | Stored rows the provenance rule calls generated are not stamped `provenance: generated`, so `generated_mode` `drop` or `route` cannot keep them out of the dense lanes; the error names the files. With approval: back up `chroma_db` and the bm25 index first (the Chroma write keeps no `.bak`), then stop `:8051`, `:8052` and Streamlit (`--yes` exits `2` while any of them answers). Run `python main.py stamp-provenance --dry-run` and read its plan, then `--yes`, then `python rebuild_bm25.py`, then restart and poll `/health`. The error names each row `in Chroma but not in the bm25 index` by id, with its file (up to ten, then how many more). A row still reported after the stamp and the rebuild exists only in the Chroma chunk collections, with no JSONL row behind it: with approval, back up `chroma_db`, then remove exactly those ids from the chunk collections. Never delete their source to clear them: that removes its valid JSONL, Chroma, HyPE and parent rows too. The stamp is metadata-only: it never re-embeds and never changes an id. |
+| `/health` reports `failed` with `RouteUnavailableError` | `retrieval.generated_mode` is `route`, the store holds generated rows, and no route pointer sidecar exists; `hint` names the fix. With approval, run the `route_pointers` job (or `python main.py route-pointers`), then restart `:8051` and poll `/health` until `route.sidecar` names the file. The build never re-embeds or writes a store. |
+| HTTP `409` from `/search`, `/query`, `/evidence_pack` or `/compare` | A per-call `generated_mode: "route"` on a store with generated rows and no route sidecar loaded. It is a real status, not a knob error, and `detail.error` names the same fix: with approval, run `route_pointers`, then restart `:8051` (automatic when `webui.auto_restart_rag` is on). Route also needs `retrieval.sparse_backend: bm25s`, and tantivy is refused first: on tantivy a per-call route is a knob error naming it, never this 409. |
 | `bench run` refuses the test split | Working as designed. Do not add `--unseal-test` without the operator's explicit approval. |
 | BGE base fails around long inputs | Ensure its configured maximum is no greater than 512. |
 | HTTP reranker transport/status/schema error | Fix the external service; do not report a provider outage or silently fall back. |
