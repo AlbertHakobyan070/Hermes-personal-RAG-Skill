@@ -5,7 +5,7 @@ description: "Operate and diagnose a configured personal-RAG corpus through its 
 
 # RAG Operations
 
-Noetrix version: 0.30.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
+Noetrix version: 0.31.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
 
 Drive the management API on `http://127.0.0.1:8052` through JSON. Use the query
 API on `http://127.0.0.1:8051` only for read-side diagnostics and verification.
@@ -592,6 +592,12 @@ partial failure and surface it; do not hide it with cleanup or a broad rebuild.
 Read `/api/vaults` before switching. Treat `POST /api/vaults/switch` as a
 mutation because it snapshots current settings and restores target settings.
 Verify the target identity and paths returned by the API before confirming.
+
+A switch carries each vault's own lane chunk files (`*.output_file`), figure,
+canvas-backup and map-staging folders, inbox and tree root, and embedder
+(`embedding.provider`, `local_model`, both prefixes). After a switch, read the
+embedder from `/api/settings` before an ingest or re-embed: it is the target
+vault's, not the one you last saw.
 
 Treat forgetting a registration separately from deleting source data or indexed
 documents. Follow the exact semantics reported by `/api/schema`.
