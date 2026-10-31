@@ -5,7 +5,7 @@ description: "Operate and diagnose a configured personal-RAG corpus through its 
 
 # RAG Operations
 
-Noetrix version: 0.31.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
+Noetrix version: 0.32.0. The server's `GET /health` reports its own `version`; when the two differ, this playbook may describe endpoints that server lacks, or miss newer ones.
 
 Drive the management API on `http://127.0.0.1:8052` through JSON. Use the query
 API on `http://127.0.0.1:8051` only for read-side diagnostics and verification.
@@ -255,6 +255,15 @@ Use the schema-defined parameters for common operations such as:
 - Metadata recalibration.
 - The graph-mode seed embedder build (`graph_embed`, see the graph lane below).
 - The route pointer sidecar (`route_pointers`, see below).
+- A fetch-engine upgrade (`engine_update`, see below).
+
+`engine_update` (`mutating`, `name`: one of the rows of `GET
+/api/fetch-engines`) upgrades that one package in the console's own Python
+environment and then installs its browser. It changes the runtime, so run
+`POST /api/fetch-engines/{name}/check` first and show the user its `changes`
+(every package the upgrade would move, from a dry run) before asking for
+approval. Inside a container the upgrade lasts only until the image is
+rebuilt; there, bump the pin in `requirements.txt` instead.
 
 `route_pointers` (`mutating`, no parameters) rebuilds
 `retrieval.route.pointers_file`, the map from each generated chunk to the

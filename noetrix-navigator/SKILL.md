@@ -5,7 +5,7 @@ description: "Gather grounded, cited, multi-hop evidence from the user's indexed
 
 # Noetrix Navigator
 
-Noetrix version: 0.31.0. The server's `GET /health` reports its own `version`; when the two differ, this procedure may name tools or fields that server lacks.
+Noetrix version: 0.32.0. The server's `GET /health` reports its own `version`; when the two differ, this procedure may name tools or fields that server lacks.
 
 An operating procedure for getting evidence out of the vault and turning it
 into a cited answer. The details behind each step (fields, failure codes,
